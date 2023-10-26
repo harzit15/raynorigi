@@ -1,0 +1,590 @@
+/**
+ * Web Widget
+ */
+var zdWdgt = function() {
+
+  var widgetCoreModule = {};
+
+  /**
+   * [OPTIONAL] Module contains collection of independent methods that intended to be used in
+   * widget configuration JSON. For example, getting Help Center user name or calculating
+   * the department based on the text in the URL.
+   *
+   * Methods are intended to be independent, so can be removed or extended depending on the customer needs.
+   *
+   * NOTE: Some objects like HelpCenter are only available on Zendesk Help Center after the page is loaded.
+   */
+  widgetCoreModule.getConfig = function() {
+
+    var mdl = {};
+
+    // Return a text from invisible HTML element and remove it after all
+    mdl.getDCValueFromHTML = function(elementId, keepElement) {
+      var dcElement = document.getElementById(elementId);
+      var formattedText = dcElement ? dcElement.textContent.replace(/(\r\n|\n|\r)/gm, '').trim() : '';
+      if (!keepElement) dcElement.remove();
+      return formattedText;
+    };
+
+    // Return Help Center user name
+    mdl.helpCenterUserName = function() {
+      return HelpCenter && HelpCenter.user && HelpCenter.user.name || '';
+    };
+
+    //  Return Help Center user email
+    mdl.helpCenterUserEmail = function() {
+      return HelpCenter && HelpCenter.user && HelpCenter.user.email || '';
+    };
+
+    // Return an object based on a text in the URL
+    mdl.fromUrl = function(prm) {
+      var result = {};
+      if (prm) {
+        result = prm.__default;
+        var url = window.location.href;
+        for (var k in prm) {
+          if (url.indexOf(k) > -1) {
+            result = prm[k];
+            break;
+          }
+        }
+      }
+      return result;
+    };
+
+    // Return an array of tags based on complex configuration
+    mdl.getVisitorTags = function(CONFIG) {
+      if (!CONFIG) return [];
+
+      var helpCenterVisitorTags = HelpCenter && HelpCenter.user && HelpCenter && HelpCenter.user && HelpCenter.user.tags;
+      var chatTagsConfig = [];
+      var chatTags = [];
+
+      if (helpCenterVisitorTags &&
+        helpCenterVisitorTags.length > 0 &&
+        (CONFIG.process_tags && CONFIG.process_tags.length > 0)) {
+
+        for (var i = 0; i < helpCenterVisitorTags.length; i++) {
+          var userTag = helpCenterVisitorTags[i];
+
+          // Process 'process_tags' setting and find tags that match pattern
+          for (var k = 0; k < CONFIG.process_tags.length; k++) {
+            var tagSettings = CONFIG.process_tags[k];
+            var find_tag_regex = new RegExp(tagSettings.find_tag_regex);
+            var tagObject = {};
+
+            if (find_tag_regex.test(userTag)) {
+              if (tagSettings.extract_from_tag_regex && tagSettings.extract_reference) {
+                var extract_from_tag_regex = new RegExp(tagSettings.extract_from_tag_regex);
+                var extract_from_tag = userTag.match(extract_from_tag_regex);
+                tagObject.extract_from_tag = extract_from_tag ? extract_from_tag[1] : '';
+                tagObject.extract_reference = tagSettings.extract_reference;
+              }
+              if (tagSettings.replace_in_tags) {
+                tagObject.value = userTag.replace(tagSettings.replace_in_tags[0], tagSettings.replace_in_tags[1]);
+              }
+              chatTagsConfig.push(tagObject);
+            }
+          }
+        }
+
+        // Process 'produce_tags' setting and calculate the output
+        if (CONFIG.produce_tags && CONFIG.produce_tags.length > 0) {
+          for (var n = 0; n < CONFIG.produce_tags.length; n++) {
+            var tagConfig = CONFIG.produce_tags[n];
+            var outcomeText = tagConfig.outcome;
+            var isvariableMissing;
+
+            for (var l = 0; l < chatTagsConfig.length; l++) {
+              var tagsConfig = chatTagsConfig[l];
+              outcomeText = outcomeText.replace('{[{' + tagsConfig.extract_reference + '}]}', tagsConfig.value);
+
+              if (!tagConfig.is_to_produce_only_outcome) chatTags.push(tagsConfig.value);
+            }
+
+            if (tagConfig.is_to_ignore_if_one_vatiable_is_missing) {
+              if (outcomeText.indexOf('{[{') < 0) chatTags.push(outcomeText);
+            } else {
+              chatTags.push(outcomeText);
+            }
+          }
+        } else {
+          for (var n = 0; n < chatTagsConfig.length; n++) {
+            chatTags.push(chatTagsConfig[n].value);
+          }
+        }
+      }
+
+      return chatTags;
+    };
+
+    return mdl;
+  };
+
+  // [MANDATORY] Module contains the core Widget script and execution logic
+  // Typically called on all pages where Widget is expected.
+  // Module expects the Widget Key and the setting object
+  widgetCoreModule.launch = function(widgetKey, widgetConfig) {
+
+    var runWidgetLogic = function() {
+      'use strict';
+
+      var ze_module = {};
+
+      /**
+       * Initializes the module.
+       * @param config
+       */
+      ze_module.init = function(config) {
+        if (!zE || !config) {
+          console.warn('ERROR: Web Widget is missing or Web Widget configuration is missing, broken or mis-formatted. Web Widget settings will not be applied.');
+          return;
+        }
+        window.onload = _applyWidgetConfig(config);
+      };
+
+      /**
+       * Executes Web Widget logic based on the configuration file.
+       * @param config
+       * @private
+       */
+      function _applyWidgetConfig(config) {
+        _updateChatSettings(config);
+        _setLocale(config.locale);
+        _widgetVisibility(config.widget_visibility);
+        _setKBSuggestions(config.articleLabels);
+        _updatePath(config.path);
+        _setUserDetails(config.prefill_name, config.prefill_email);
+        _identifyUsers(config.identify_name, config.identify_email);
+        _updateGlobalSettings(config);
+        _setAnalytics(config);
+      }
+
+      /**
+       * Sets the Google Analytics tracking code.
+       * @param config
+       * @private
+       */
+      function _setAnalytics(config) {
+        if (window.zESettings) {
+          if ((window.zESettings.analytics === undefined)) {
+            window.zESettings.analytics = config.analytics;
+          }
+        } else {
+          window.zESettings = {
+            analytics: config.analytics
+          }
+        }
+      }
+
+      /**
+       * Sets the Web Widget locale.
+       * @param locale
+       * @private
+       */
+      function _setLocale(locale) {
+        locale && zE('webWidget', 'setLocale', locale);
+      }
+
+      /**
+       * Sets the Web Widget visibility (hide, show or open).
+       * @param widgetVisibility
+       * @private
+       */
+      function _widgetVisibility(widgetVisibility) {
+        widgetVisibility && zE('webWidget', widgetVisibility);
+      }
+
+      /**
+       * Sets the Web Widget suggested articles.
+       * @param articleLabels
+       * @private
+       */
+      function _setKBSuggestions(articleLabels) {
+        articleLabels && zE('webWidget', 'helpCenter:setSuggestions', {
+          labels: articleLabels
+        });
+      }
+
+      /**
+       * Pre-fills user details.
+       * @param name
+       * @param email
+       * @private
+       */
+      function _setUserDetails(name, email) {
+        email && zE('webWidget', 'prefill', {
+          name: {
+            value: name,
+            readOnly: true
+          },
+          email: {
+            value: email,
+            readOnly: true
+          }
+        });
+      }
+
+      /**
+       * Identifies a user to Zendesk.
+       * @param identify_name
+       * @param identify_email
+       * @private
+       */
+      function _identifyUsers(identify_name, identify_email) {
+        identify_email && zE('webWidget', 'identify', {
+          name: identify_name,
+          email: identify_email
+        });
+      }
+
+      /**
+       * Updates the chat visitor path.
+       * @param pathObject
+       * @private
+       */
+      function _updatePath(pathObject) {
+        pathObject && zE('webWidget', 'updatePath', pathObject);
+      }
+
+      /**
+       * Extends the configuration with suppress logic.
+       * @param prop
+       * @param val
+       * @private
+       */
+      function _setSurpressSettingProp(prop, val) {
+        if (window.zESettings && window.zESettings.webWidget) {
+          var ww = window.zESettings.webWidget;
+          if (ww[prop]) ww[prop].suppress = val;
+          else ww[prop] = {
+            'suppress': val
+          }
+        } else console.warn('ERROR: Widget is missing window.zESettings object.')
+      }
+
+      /**
+       * Updates global Web Widget settings.
+       * @param config
+       * @private
+       */
+      function _updateGlobalSettings(config) {
+        window.zESettings = config.webWidgetConfig ? {
+          webWidget: config.webWidgetConfig
+        } : {
+          webWidget: {
+            chat: {
+              departments: {}
+            }
+          }
+        };
+        if (!window.zESettings.webWidget.chat) window.zESettings.webWidget.chat = {
+          departments: {}
+        };
+        _setSurpressSettingProp('helpCenter', !config.HCSearch);
+        _setSurpressSettingProp('contactForm', !config.contactForm);
+        _setSurpressSettingProp('talk', !config.talk);
+        _setSurpressSettingProp('answerBot', !config.answerBot);
+        // _setSurpressSettingProp('chat', !config.chat); // suppressing chat channel is handled after chat is connected
+        _adjustChatLabel(config);
+      }
+
+      /**
+       * Updates the Web Widget launcher label if contact options and chat are enabled.
+       * @param config
+       * @private
+       */
+      function _adjustChatLabel(config) {
+        var wwConf = window.zESettings.webWidget;
+        if (wwConf.contactOptions && wwConf.contactOptions.enabled && wwConf.launcher) {
+          if (!(config.chat && !config.HCSearch && !config.contactForm && !config.talk && !config.answerBot)) wwConf.launcher.chatLabel = wwConf.launcher.label;
+        }
+      }
+
+      /**
+       * Updates chat-specific settings when chat is connected.
+       * @param config
+       * @private
+       */
+      function _updateChatSettings(config) {
+        zE('webWidget:on', 'chat:connected', function() {
+          _handleChatSettings(config);
+
+          // Show or hide the concierge options in the profile card area
+          zE('webWidget', 'updateSettings', {
+            webWidget: {
+              chat: {
+                profileCard: {
+                  avatar: true,
+                  rating: true,
+                  title: true
+                }
+              }
+            }
+          });
+
+          zE('webWidget:on', 'chat:status', function(status) {
+            _handleChatSettings(config);
+          });
+
+          zE('webWidget:on', 'chat:departmentStatus', function(status) {
+            _handleChatSettings(config);
+          });
+
+          zE('webWidget:on', 'chat:start', function() {
+            // your code here
+          });
+
+          zE('webWidget:on', 'chat:end', function() {
+            // your code here
+          });
+
+          // Execute command when number of unread messages in chat changed. It's intended to address proactive
+          // message use-case when Widget is hidden, but trigger or Agent want proactively start the chat.
+          zE('webWidget:on', 'chat:unreadMessages', function(number) {
+            if ((zE('webWidget:get', 'display') == 'hidden')) {
+              if (number > 0) _displayChat(config);
+              if (number == 0) _openWidget(false);
+            }
+          });
+
+          // [OPTIONAL]: For demo purposes only on Zendesk Guide
+          // <a style="color:blue;" id="open_chat" class="submit-a-request" href="#">Open Chat</a>
+          // When clicked will display Chat in the Widget
+          document.getElementById('open_chat').addEventListener('click', function(e) {
+            e.stopPropagation();
+            _openChannel('chat', config);
+          }, true);
+
+          // [OPTIONAL]:For demo purposes only on Zendesk Guide
+          // <a style="color:green;" id="open_contact_form" class="submit-a-request" href="#">Open Contact Form</a>
+          // When clicked will display Contact Form in the Widget
+          document.getElementById('open_contact_form').addEventListener('click', function(e) {
+            e.stopPropagation();
+            _openChannel('contactForm', config);
+          }, true);
+
+          // When visitor is chatting on one page and navigates to the page where chat is suppressed
+          // it should re-open the Widget on the chat screen. Since there is no method to show chat screen
+          // this workaround will suppress other channels > show Widget on the chat screen > re-enable
+          // other channels as per the config. Visitor may need to minimize and re-open the widget to
+          // see the effect of re-enabling the other channels.
+          // Widget will not be auto-shown on mobile devices.
+          _displayChat(config);
+
+        });
+      }
+
+      /**
+       * Shows the Web Widget and opens it for desktop devices.
+       * @param isDesktop
+       * @private
+       */
+      function _openWidget(isDesktop) {
+        isDesktop = (isDesktop == undefined) ? !(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) : isDesktop;
+        zE('webWidget', 'show');
+        isDesktop && zE('webWidget', 'open');
+      }
+
+
+      /**
+       * Forces the Web Widget to be displayed in Chat state.
+       * @param config
+       * @private
+       */
+      function _displayChat(config) {
+        if ((zE && zE('webWidget:get', 'chat:isChatting'))) {
+          if (zE('webWidget:get', 'display') !== 'chat') {
+            _openChannel('chat', config);
+          }
+        }
+      }
+
+      /**
+       * Opens the Web Widget with specific channels.
+       * Intended to be used when Widget is controlled outside.
+       * @param channel
+       * @param config Global variable for config
+       * @private
+       */
+      function _openChannel(channel, config) {
+        var allowedChannels = ['contactForm', 'chat']; // limiting channels to desired ones
+        if (channel && allowedChannels.indexOf(channel) > -1) {
+          zE('webWidget', 'updateSettings', _getSingleChanelSettings(channel));
+          _openWidget();
+        }
+        onCloseRevertBackWidgetConfig(config);
+      }
+
+      /**
+       * Adds an event listener when the Web Widget is minimized.
+       * This should be executed only once.
+       * @type {Function}
+       */
+      var onCloseRevertBackWidgetConfig = (function(config) {
+        var executed = false;
+        return function(config) {
+          if (!executed) {
+            executed = true;
+            zE('webWidget:on', 'close', function() {
+              zE('webWidget', 'updateSettings', _getDefaultWidgetSettings(config));
+            });
+          }
+        };
+      })();
+
+      /**
+       * Restores the original state of Web Widget channels.
+       * @param config
+       * @returns {{helpCenter: {suppress: boolean}, chat: {suppress: boolean}, answerBot: {suppress: boolean}, talk: {suppress: boolean}, contactForm: {suppress: boolean}}}
+       * @private
+       */
+      function _getDefaultWidgetSettings(config) {
+        return {
+          helpCenter: {
+            'suppress': !config.HCSearch
+          },
+          contactForm: {
+            'suppress': !config.contactForm
+          },
+          talk: {
+            'suppress': !config.talk
+          },
+          answerBot: {
+            'suppress': !config.answerBot
+          },
+          // Extra condition for chat suppress logic helps forcing Chat to be shown
+          // with ongoing chat on pages where chat is supressed
+          chat: {
+            'suppress': !(config.chat || (zE && zE('webWidget:get', 'chat:isChatting')))
+          }
+        };
+      }
+
+      /**
+       * Restore all suppressed Web Widget channels except the specified one.
+       * @param channel
+       * @returns {{helpCenter: {suppress: boolean}, chat: {suppress: boolean}, answerBot: {suppress: boolean}, talk: {suppress: boolean}, contactForm: {suppress: boolean}}}
+       * @private
+       */
+      function _getSingleChanelSettings(channel) {
+        var defaultWidgetSettings = {
+          helpCenter: {
+            'suppress': true
+          },
+          contactForm: {
+            'suppress': true
+          },
+          talk: {
+            'suppress': true
+          },
+          answerBot: {
+            'suppress': true
+          },
+          chat: {
+            'suppress': true
+          }
+        };
+        defaultWidgetSettings[channel].suppress = false;
+        return defaultWidgetSettings;
+      }
+
+      /**
+       * Returns true if chat departments were defined.
+       * @param departments
+       * @returns {boolean}
+       * @private
+       */
+      function _isChatDepartamentDefined(departments) {
+        return !departments || ((departments.enabled !== undefined) || (departments.select !== undefined));
+      }
+
+      /**
+       * Updates chat-specific settings.
+       * @param config
+       * @private
+       */
+      function _handleChatSettings(config) {
+
+        setTimeout(function() { // Delay is needed to allow chat server to update. Otherwise isChatting is always true
+          if (_isChatDepartamentDefined(config.departments)) {
+            var department_status,
+              isDepartmentOnline,
+              isChatting = zE && zE('webWidget:get', 'chat:isChatting');
+
+            // Handles different combinations od Chat departments config
+            // 1 - when department is selected it will suppress chat based on that department online status
+            // 2 - when department is NOT selected it will suppress chat if none of listed departments is online
+            // 3 - (handled outside of this block) if departments is empty or undefined no department online status check will be applied
+            if (config.departments && config.departments.select) {
+              department_status = zE('webWidget:get', 'chat:department', config.departments.select);
+              isDepartmentOnline = department_status && department_status.status === 'online';
+            } else if (config.departments && config.departments.enabled && config.departments.enabled.length) {
+              for (var i = 0; i < config.departments.enabled.length; i++) {
+                var chatDep = zE('webWidget:get', 'chat:department', config.departments.enabled[i]);
+                if (chatDep === undefined) {
+                  console.warn('ERROR: The following department may not exist, may be inactive or setting in this script may contain incorrect name: ' + config.departments.enabled[i]);
+                }
+                if (chatDep && (chatDep.status === 'online')) {
+                  isDepartmentOnline = true;
+                  break;
+                }
+              }
+            }
+            if (isChatting || (config.chat && isDepartmentOnline)) {
+              // ONLINE LOGIC
+              // Chat will be suppressed when no one is chatting or when department is offline
+              zE('webWidget', 'updateSettings', {
+                webWidget: {
+                  chat: {
+                    departments: config.departments,
+                    suppress: false
+                  }
+                }
+              });
+
+              // This addresses proactive message use case when Widget is hidden from the settings
+              if (config.widget_visibility === 'hide') _displayChat(config);
+
+            } else {
+              // OFFLINE & UNDEFINED LOGIC (undefined = a department with this name doesn't exist OR the department has been disabled)
+              // suppress the Chat channel as the targeted department is offline
+              zE('webWidget', 'updateSettings', {
+                webWidget: {
+                  chat: {
+                    suppress: true
+                  }
+                }
+              });
+            }
+          } else {
+            zE('webWidget', 'updateSettings', window.zESettings.webWidget);
+          }
+        }, 100);
+      }
+
+      return ze_module;
+    };
+
+    /**
+     * Adds the Web Widget script to the page.
+     */
+    function fireWidgetOnLoad() {
+      var zendeskScript = document.createElement('script');
+
+      // Broken down the URL to bypass mimecast protection
+      zendeskScript.src = 'https' + '://static' + '.zdassets.' + 'com/ekr' + '/snippet.js?key=' + widgetKey;
+      zendeskScript.id = 'ze-snippet';
+      zendeskScript.addEventListener('load', function() {
+        runWidgetLogic().init(widgetConfig)
+      });
+      document.getElementsByTagName('body')[0].appendChild(zendeskScript);
+    }
+
+    // execute widget logic when widget code is loaded from the source
+    window.addEventListener ? window.addEventListener('load', fireWidgetOnLoad, !1) : window.attachEvent ? window.attachEvent('onload', fireWidgetOnLoad) : window.onload = fireWidgetOnLoad;
+
+  };
+
+  return widgetCoreModule;
+};

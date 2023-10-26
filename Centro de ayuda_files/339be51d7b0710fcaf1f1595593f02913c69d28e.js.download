@@ -1,0 +1,859 @@
+/**
+ * Conditional form fields.
+ * 2.4.0 (last updated 2021-04-12)
+ * @returns {*}
+ */
+var hcForm =  function() {
+
+  'use strict';
+
+  // Simplifies using config file in the module
+  var PARAMS = {};
+
+  /************** PRIVATE METHODS **************/
+
+  /**
+   * Checks config presence and initialize the logic.
+   * @param config
+   * @param i18n
+   * @private
+   */
+  function _initFieldsCheck(config, i18n) {
+    PARAMS = config;
+    PARAMS.no_validate = [
+      "request_ticket_form_id",
+      "request_anonymous_requester_email",
+      "request_subject",
+      "upload-dropzone",
+      "request_description",
+      "submit",
+      "request_due_at"
+    ];
+    PARAMS.i18n = {
+      "this_field":"This field",
+      "cannot_be_blank":"cannot be blank"
+    };
+    if (i18n && (i18n instanceof Object)) $.extend(PARAMS.i18n, i18n);
+    var current_form_id = _getUrlParameter('ticket_form_id') || $('#request_issue_type_select').val() || $('#request_ticket_form_id').val();
+    PARAMS._current_form_settings = PARAMS[current_form_id];
+    if (PARAMS._current_form_settings &&
+      PARAMS._current_form_settings.conditions &&
+      $.isArray(PARAMS._current_form_settings.conditions) &&
+      PARAMS._current_form_settings.conditions.length) {
+      _initConditionsCheck(PARAMS);
+    }
+  }
+
+  /**
+   * Hides all configured fields and attaches event listeners.
+   * @private
+   */
+  function _initConditionsCheck() {
+    var fields_to_listen = [],
+      fields_to_hide = [],
+      fields_to_require = [];
+    // when fields specified under ACTIONS.SHOW should be hidden on form load
+    for (var i = 0; i < PARAMS._current_form_settings.conditions.length; i++) {
+      var to_require = PARAMS._current_form_settings.conditions[i].actions.required;
+      fields_to_listen = fields_to_listen.concat(_getKeys(PARAMS._current_form_settings.conditions[i].all_conditions));
+      fields_to_hide = fields_to_hide.concat(PARAMS._current_form_settings.conditions[i].actions.show);
+      fields_to_require = to_require !== undefined ? fields_to_require.concat(to_require) : fields_to_require;
+    }
+    fields_to_listen = _removeDuplicates(fields_to_listen);
+    fields_to_hide = _removeDuplicates(fields_to_hide);
+    fields_to_require = _removeDuplicates(fields_to_require);
+    PARAMS.fields_to_listen = fields_to_listen;
+
+    // if configured try to hide all fields on the form
+    if (PARAMS._current_form_settings.config &&
+      PARAMS._current_form_settings.config.hide_all_fields_on_load) { // when all form fields should be hidden
+      fields_to_hide = _getAllFormFields('new_request');
+      if (PARAMS._current_form_settings.config.never_hide_fields_on_load &&
+        PARAMS._current_form_settings.config.never_hide_fields_on_load.length) { // if configured exclude some fields from being hidden on load
+        fields_to_hide = _arrayDifference(fields_to_hide, PARAMS._current_form_settings.config.never_hide_fields_on_load);
+      }
+      if (!PARAMS._current_form_settings.config.hide_fields_from_all_conditions) { // if configured hide fields listed as conditions
+        if (fields_to_listen && fields_to_listen.length) fields_to_hide = _arrayDifference(fields_to_hide, fields_to_listen);
+      }
+    }
+    if (PARAMS._current_form_settings.config &&
+      PARAMS._current_form_settings.config.new_ticket_fields_order &&
+      PARAMS._current_form_settings.config.new_ticket_fields_order.length) { // if configured apply new ticket fields order
+      _reOrderFields(PARAMS._current_form_settings.config.new_ticket_fields_order);
+    }
+    // flag system required fields
+    $('.form-field.required').addClass('system_required');
+    $('#new_request').submit(_validateForm);
+    // initial fields handling
+    _attachEventListeners(fields_to_listen);
+    _attachVisibilityListeners(fields_to_listen);
+    _checkConditions(fields_to_hide);
+  }
+
+  /**
+   * Re-arranges form fields in provided order.
+   * @param new_fields_order
+   * @private
+   */
+  function _reOrderFields(new_fields_order) {
+    var fields_not_for_reorder = ['submit'], $first_element, $last_element;
+    for (var i = 0; i < new_fields_order.length; i++) {
+      var key = new_fields_order[i], $field_block;
+      if (fields_not_for_reorder.indexOf(key) > -1) {
+        // do not reorder field, e.g. Submit button should always be at the botton
+      } else if (_isAttachment(key)) { // handle attachment section
+        $field_block = $('#'+key).parent();
+      } else if (_isCustomField(key)) { // handle custom fields
+        $field_block = $('.request_custom_fields_'+key);
+      } else if (key === 'request_subject') { // subject goes with suggestion box
+        $field_block = $('.'+key+', .suggestion-list');
+      } else {
+        $field_block = $('.'+key);
+      }
+      if ($field_block && $field_block.length) {
+        if ($first_element && $first_element.length) { // if first element exist change the order
+          $field_block.insertAfter($last_element);
+        } else { // if no first element define it
+          $first_element = $field_block;
+        }
+        $last_element = $field_block.hasClass('request_subject') ? $('.suggestion-list') : $field_block;
+      }
+    }
+  }
+
+  /**
+   * Returns script-friendly field IDs for a given ticket form.
+   * @param form_id
+   * @returns {[]}
+   * @private
+   */
+  function _getAllFormFields(form_id) {
+    var $form = $('#'+form_id),
+      field_ids = [],
+      rgx_request = new RegExp("(request_[a-z|_]+)"),
+      rgx_custom_field = new RegExp("[0-9]+");
+    if ($form.length) {
+      $form.find('.form-field').each(function(i, el) {
+        var classes = $(el).attr("class");
+        if (classes.indexOf("request_custom_fields") !== -1) { // if custom field
+          var custom_field_id = classes.match(rgx_custom_field);
+          if (custom_field_id) field_ids.push(custom_field_id[0]);
+        } else if (classes.indexOf("request") !== -1) { // if system field
+          var system_field_id = classes.match(rgx_request);
+          if (system_field_id) field_ids.push(system_field_id[0]);
+        } else if ($(el).find('#upload-dropzone').length > 0) { // if attachment
+          field_ids.push("upload-dropzone")
+        }
+      });
+      field_ids.push("submit");
+    }
+    return field_ids;
+  }
+
+  /**
+   * Evaluates conditions and actions for given fields.
+   * @param allFormFieldsToHide
+   * @private
+   */
+  function _checkConditions(allFormFieldsToHide) {
+    var fields_to_show = [],
+      fields_to_hide = [],
+      fields_to_require = [],
+      field_to_unrequire = [],
+
+      // if 'is_last_win' configured to be true it will force the actions from the last valid condition to overwrite
+      // any other conficting actions. Otherwise, conflicting actions will nulify themself. Read more about in the
+      // script readme file/section.
+      is_last_win = !!PARAMS._current_form_settings.config.use_last_valid_condition_win_logic;
+
+    if (is_last_win) {
+      var confirmed_fields_to_show = [],
+        confirmed_fields_to_hide = [],
+        confirmed_fields_to_require = [],
+        confirmed_fields_to_unrequire = [];
+    }
+
+    for (var i = 0; i < PARAMS._current_form_settings.conditions.length; i++) {
+      var conditions = PARAMS._current_form_settings.conditions[i].all_conditions,
+        to_show = PARAMS._current_form_settings.conditions[i].actions.show,
+        to_hide = PARAMS._current_form_settings.conditions[i].actions.hide,
+        to_require = PARAMS._current_form_settings.conditions[i].actions.required;
+      if (_isAllConditionsMet(conditions)) {
+        if (is_last_win) {
+          confirmed_fields_to_show = confirmed_fields_to_show.concat(to_show);
+          confirmed_fields_to_hide = confirmed_fields_to_hide.concat(to_hide);
+          confirmed_fields_to_require = to_require !== undefined ? confirmed_fields_to_require.concat(to_require) : confirmed_fields_to_unrequire;
+        } else {
+          fields_to_show = fields_to_show.concat(to_show);
+          fields_to_hide = fields_to_hide.concat(to_hide);
+          fields_to_require = to_require !== undefined ? fields_to_require.concat(to_require) : fields_to_require;
+        }
+      } else {
+        fields_to_hide = fields_to_hide.concat(to_show);
+        fields_to_show = fields_to_show.concat(to_hide);
+        field_to_unrequire = field_to_unrequire.concat(to_require);
+      }
+    }
+
+    if (is_last_win) {
+      fields_to_show = _removeDuplicates(fields_to_show).concat(_removeDuplicates(confirmed_fields_to_show));
+      fields_to_hide = _removeDuplicates(fields_to_hide).concat(_removeDuplicates(confirmed_fields_to_hide));
+      fields_to_require = _removeDuplicates(fields_to_require).concat(_removeDuplicates(confirmed_fields_to_require));
+      field_to_unrequire = _removeDuplicates(field_to_unrequire).concat(_removeDuplicates(confirmed_fields_to_unrequire));
+    } else {
+      fields_to_show = _removeDuplicates(fields_to_show);
+      fields_to_hide = _removeDuplicates(fields_to_hide);
+      fields_to_require = _removeDuplicates(fields_to_require);
+      field_to_unrequire = _removeDuplicates(field_to_unrequire);
+    }
+
+    if (allFormFieldsToHide && allFormFieldsToHide.length) {
+      // TODO check/update this condition to work with confirmed_fields variables
+      fields_to_hide = _arrayDifference(_removeDuplicates(allFormFieldsToHide.concat(fields_to_hide)), fields_to_show);
+    }
+
+    _showFields(fields_to_show);
+    _unRequireFields(field_to_unrequire);
+    _makeFieldsRequired(fields_to_require);
+    if (is_last_win) {
+      _hideFields(fields_to_hide);
+    } else {
+      _hideFields(_arrayDifference(fields_to_hide, fields_to_show));
+    }
+  }
+
+  /**
+   * Attaches a special event listener to the CC field.
+   * @param listener
+   * @private
+   */
+  function _toggleCClistener(listener) {
+    var ccFieldRef = listener.ccFieldRef || 'request_cc_emails';
+
+    if (PARAMS.observer && listener.isToRemoveObserver) {
+      PARAMS.observer.disconnect();
+    } else if (listener.callback && !listener.isToRemoveObserver) {
+      var targetNode = $('.'+ccFieldRef).find('ul')[0];
+      if (targetNode) {
+        PARAMS.observer = new MutationObserver(listener.callback);
+        PARAMS.observer.observe(targetNode, { attributes: false, childList: true, subtree: false });
+      }
+    }
+  }
+
+  /**
+   * Attaches event listeners to the specified fields.
+   * @param field_ids
+   * @private
+   */
+  function _attachEventListeners(field_ids) {
+    if (field_ids) {
+      for (var i = 0; i < field_ids.length; i++) {
+        if (_isCustomField(field_ids[i])) {
+          $('#request_custom_fields_'+field_ids[i]).on('change', _checkConditions);
+        } else if (_isSpecialField(field_ids[i]) || ["request_ticket_form_id"].indexOf(field_ids[i]) > -1) {
+          // no change listeners for special fields nor ticket form
+        } else if (_isCCField(field_ids[i])) { // check if given field is CC
+          var targetNode = $('.'+field_ids[i]).find('ul')[0];
+
+          if (targetNode) {
+            _toggleCClistener({ callback:_checkConditions });
+          } else {
+
+            // CC field appear with some delay rather than to be loaded with all other fields
+            // using setTimeout to wait for CC field to appear.
+            // Well understood, this is not the best practice, but project timing suggest for
+            // faster turnaround. Hence this:
+            // TODO: handle CC field changes when this added to the DOM rather than using setTimeout
+            setTimeout(function() {
+              _toggleCClistener({ callback:_checkConditions });
+            }, 2000);
+          }
+        } else {
+          $('#'+field_ids[i]).on('change', _checkConditions);
+        }
+      }
+    }
+  }
+
+
+  /**
+   * Attach mutation observers to nullify a field if it becomes invisible.
+   * @param field_ids
+   * @private
+   */
+  function _attachVisibilityListeners(field_ids) {
+    // Native Conditional Field App will NOT set field to "empty" when it gets hidden
+    // instead it will nullify that field at submit event. Such behaviour doesn't work will
+    // with this script. This visibility listener will set a field to "empty" when it is get
+    // hidden by any other script.
+    if (field_ids) {
+      for (var i = 0; i < field_ids.length; i++) {
+        if (_isCustomField(field_ids[i])) { // custom field
+          _linkVisibilityCheck($('.request_custom_fields_'+field_ids[i]), field_ids[i]);
+        } else if (_isSpecialField(field_ids[i]) || ["request_ticket_form_id"].indexOf(field_ids[i]) > -1) {
+          // no visibility listeners for special fields nor ticket form
+        } else if (_isCCField(field_ids[i])) { // check if given field is CC
+          var targetNode = $('.'+field_ids[i]).find('ul')[0];
+
+          if (targetNode) {
+            _linkVisibilityCheck($('.'+field_ids[i]), field_ids[i]);
+          } else {
+            // CC field appear with some delay rather than to be loaded with all other fields
+            // using setTimeout to wait for CC field to appear.
+            // Well understood, this is not the best practice, but project timing suggest for
+            // faster turnaround. Hence this:
+            // TODO: handle CC field changes when this added to the DOM rather than using setTimeout
+            setTimeout(function() {
+              _linkVisibilityCheck($('.'+field_ids[i]), field_ids[i]);
+            }, 2000);
+          }
+        } else { // any other field
+          _linkVisibilityCheck($('.'+field_ids[i]), field_ids[i]);
+        }
+      }
+    }
+  }
+
+  /**
+   * Attaches a mutation observer to a field to check for attribute changes.
+   * @param $targetNode
+   * @param field_id
+   * @private
+   */
+  function _linkVisibilityCheck($targetNode, field_id) {
+    if ($targetNode) {
+      var observer = new MutationObserver(function(mutationsList, observer) {
+        _handleVisivilityChange(mutationsList, field_id);
+      });
+      if ($targetNode[0]) {
+        observer.observe($targetNode[0], { attributes: true });
+        $targetNode.attr('data-visibility-check-enabled', true); // Optional flag indicating linked MutationObserver
+      }
+    }
+  }
+
+
+  /**
+   * Resets the field with the given field ID when it's hidden.
+   * @param mutationsList
+   * @param field_id
+   * @private
+   */
+  function _handleVisivilityChange(mutationsList, field_id) {
+    if (!$(mutationsList[0].target).is(':visible')) _nulifyField(field_id);
+  }
+
+  /**
+   * Returns the value of the CC field as a stringified Array with comma separated values.
+   * @param ccFieldRef
+   * @returns {string}
+   * @private
+   */
+  function _getCCvalue(ccFieldRef) {
+    var key = ccFieldRef || 'request_cc_emails';
+    var $elems = $('.' + key).find('ul').children().find('input');
+    var emails = [];
+    if ($elems) {
+      $elems.each(function(){
+        var v = $(this).val();
+        if ( v && ((typeof v === 'string' || v instanceof String)) ) emails.push(v);
+      });
+    }
+    return emails.toString();
+  }
+
+  /**
+   * Returns true if all conditions are met.
+   * @param all_conditions
+   * @returns {boolean}
+   * @private
+   */
+  function _isAllConditionsMet(all_conditions) {
+    var isAllConditionsMet = true;
+    if (all_conditions && all_conditions.length) {
+      $.each(all_conditions, function(index, obj) {
+        var key = Object.keys(obj)[0],
+          val = obj[key],
+          field_value;
+        if (_isCheckbox(key)) { // checkbox
+          field_value = $('#request_custom_fields_'+key).prop("checked");
+        } else if (_isAttachment(key)) {
+          // no action if attachment is used as conditions
+        } else if (_isCustomField(key)) {
+          field_value = $('#request_custom_fields_'+key).val();
+        } else if (_isTicketForm(key)) {
+          field_value = $('#request_issue_type_select').val() || $('#request_ticket_form_id').val();
+        } else if (_isCCField(key)) {
+          field_value = _getCCvalue();
+        } else {
+          field_value = $('#'+key).val();
+        }
+        if (field_value !== val) isAllConditionsMet = false;
+      });
+    } else isAllConditionsMet = false;
+    return isAllConditionsMet;
+  }
+
+  /**
+   * Shows fields with the specified IDs.
+   * @param field_ids
+   * @private
+   */
+  function _showFields(field_ids) {
+    if (field_ids) {
+      for (var i = 0; i < field_ids.length; i++) {
+        if (field_ids[i] instanceof Object) { // handle HTML message
+          _showHTML(field_ids[i]);
+        } else { // handle field
+          if (_isCustomField(field_ids[i])) {
+            $('#request_custom_fields_'+field_ids[i]).parent().show();
+          } else if (_isSpecialField(field_ids[i])) {
+            if (field_ids[i] === "submit") $('#new_request').find('footer').show();
+            if (field_ids[i] === "upload-dropzone") $('#upload-dropzone').parent().show();
+          } else {
+            $('.'+field_ids[i]).show();
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Displays HTML messages in the form.
+   * @param html_object
+   * @private
+   */
+  function _showHTML(html_object) {
+    if (html_object && html_object.html) {
+      var $el = $('<div class="zd-new-form-reference">'+html_object.html+'</div>');
+      if (html_object.inline_css) $el[0].style = html_object.inline_css;
+      $el[0].id = html_object.message_id || ('zd_' + Math.ceil(Math.random() * 10000));
+      if (html_object.field_id_to_insert_msg_after) {
+        var $field = _isCustomField(html_object.field_id_to_insert_msg_after) ? $('.request_custom_fields_'+html_object.field_id_to_insert_msg_after)[0] : $('.'+html_object.field_id_to_insert_msg_after)[0];
+        if (!( $('#' + $el[0].id).length )) $el.insertAfter($field);
+      } else {
+        if (!( $('#' + $el[0].id).length )) $el.insertAfter($('#new_request'));
+      }
+    } else {
+      console.warn('CONDITIONAL DISPLAYING: HTML message defined in script config is missing "html" key. No message will be displayed');
+    }
+  }
+
+  /**
+   * Removes HTML messages from the form.
+   * @param html_object
+   * @private
+   */
+  function _hideHTML(html_object) {
+    if (html_object && html_object.html) {
+      var $msg = html_object.message_id ? $('#'+html_object.message_id) : $('.zd-new-form-reference');
+      $msg.remove();
+    } else {
+      console.warn('CONDITIONAL DISPLAYING: HTML message defined in script config is missing "html" key. No message will be handled');
+    }
+  }
+
+  /**
+   * Makes the specified fields look required and adds them to the validation list.
+   * @param field_ids
+   * @private
+   */
+  function _makeFieldsRequired(field_ids) {
+    if (field_ids && field_ids.length) {
+      var all_fields = _arrayDifference(field_ids, PARAMS.no_validate);
+      for (var i = 0; i < all_fields.length; i++) {
+        if (_isVisible(all_fields[i])) {
+          var $field = _isCustomField(all_fields[i]) ? $('.request_custom_fields_'+all_fields[i]) : $('.'+all_fields[i]);
+          if (!$field.hasClass('validate')) $field.addClass('validate');
+          if (!$field.hasClass('required')) $field.addClass('required');
+        }
+      }
+    }
+  }
+
+  /**
+   * Executes the form validation rules and scrolls to the top of the form.
+   * @param e
+   * @returns {boolean}
+   * @private
+   */
+  function _validateForm(e) {
+    var areFieldsValid = !_isAllFieldsValid();
+    if (areFieldsValid) {
+      e.preventDefault();
+      setTimeout(function() { $('#new_request [type="submit"]').prop('disabled', false); }, 1000);
+      $('html, body').animate({ scrollTop: $("#new_request").offset().top }, 1000);
+      // Executing callback at form submission failure
+      var callback = PARAMS._current_form_settings.config.submission_failure_callback;
+      if (callback) callback();
+      return true;
+    }
+  }
+
+  /**
+   * Returns true if all fields are valid, otherwise displays error messages in the form.
+   * @returns {boolean}
+   * @private
+   */
+  function _isAllFieldsValid() { // validate form fields and display error messages in the form
+    var invalid_fields = [];
+    $('#new_request .validate').each(function(){
+      var field_value,
+        isCCfield = $(this).hasClass('request_cc_emails');
+
+      if (isCCfield) {
+        field_value = _getCCvalue();
+      } else {
+        var field_id = _getInputId($(this)),
+          $field = $('#'+field_id);
+        field_value = ($field.attr('type') === "checkbox") ? $field.prop("checked") : $field.val();
+      }
+
+      if (_isEmpty(field_value)) {
+        var label = $(this).find('label').text() || PARAMS.i18n.this_field;
+
+        if (!$(this).find('div.notification').length) {
+          $(this).append('<div class="notification notification-error notification-inline">' + label + ': ' + PARAMS.i18n.cannot_be_blank + '</div>');
+        } else if (isCCfield) {
+          $(this).find('div.notification').text(label + ': ' + PARAMS.i18n.cannot_be_blank).attr('aria-hidden', false);
+        }
+        invalid_fields.push(label);
+      } else {
+        if ($(this).find('div.notification').length) {
+          if (isCCfield) {
+            $(this).find('div.notification').attr('aria-hidden', true).text('');
+          } else {
+            $(this).find('div.notification').remove();
+          }
+        }
+      }
+    });
+
+    return !invalid_fields.length;
+  }
+
+  /**
+   * Returns a script-friendly field ID.
+   * @param $field
+   * @returns {string}
+   * @private
+   */
+  function _getInputId($field) {
+    var field_id = '';
+    if ($field) {
+      var classes = $field[0].classList;
+      for (var i = 0; i < classes.length; i++) {
+        if (classes[i].indexOf('request_') !== -1) {
+          field_id = classes[i];
+          break;
+        }
+      }
+    }
+    return field_id;
+  }
+
+  /**
+   * Nullifies and hides fields and handles change event listeners.
+   * @param field_ids
+   * @private
+   */
+  function _hideFields(field_ids) {
+    if (field_ids) {
+      for (var i = 0; i < field_ids.length; i++) {
+        if (field_ids[i] instanceof Object) {
+          _hideHTML(field_ids[i]);
+        } else {
+          if (_isCustomField(field_ids[i])) {
+            var $field = $('#request_custom_fields_'+field_ids[i]);
+            $field.off('change');
+            _nulifyField(field_ids[i]);
+            $field.parent().hide();
+            if (_hasChangeListener(field_ids[i])) _attachEventListeners([field_ids[i]]);
+          } else if (_isSpecialField(field_ids[i])) {
+            if (field_ids[i] === "submit") $('#new_request').find('footer').hide();
+            if (field_ids[i] === "upload-dropzone") {
+              $('#upload-dropzone').parent().hide();
+              _nulifyField(field_ids[i]);
+            }
+          } else if (_isCCField(field_ids[i])) {
+            $('.'+field_ids[i]).hide();
+            _toggleCClistener({ isToRemoveObserver: true });
+            _nulifyField(field_ids[i]);
+          } else if (field_ids[i] === "request_ticket_form_id") {
+            $('.'+field_ids[i]).hide();
+          } else {
+            var $field = $('#'+field_ids[i]);
+            $field.off('change');
+            _nulifyField(field_ids[i]);
+            $field.parent().hide();
+            if (_hasChangeListener(field_ids[i])) _attachEventListeners([field_ids[i]]);
+          }
+          _unRequireFields([field_ids[i]]);
+        }
+      }
+    }
+  }
+
+  /**
+   * Removes the required status from specified fields.
+   * @param field_ids
+   * @private
+   */
+  function _unRequireFields(field_ids) {
+    if (field_ids && field_ids.length) {
+      for (var i = 0; i < field_ids.length; i++) {
+        var $field;
+        if (PARAMS.no_validate.indexOf(field_ids[i]) === -1) {
+          $field = _isCustomField(field_ids[i]) ? $('.request_custom_fields_'+field_ids[i]) : $('.'+field_ids[i]);
+        }
+        if ($field) {
+          if ($field.hasClass('validate')) $field.removeClass('validate');
+          if (!$field.hasClass('system_required')) $field.removeClass('required');
+        }
+
+      }
+    }
+  }
+
+  /**
+   * Sets the value of the CC field to empty.
+   * @param ccFieldRef
+   * @private
+   */
+  function _nulifyCC(ccFieldRef) {
+    ccFieldRef = ccFieldRef || 'request_cc_emails';
+    var $elems = $('.' + ccFieldRef).find('ul').children();
+    $elems.each(function(){
+      if ($(this).attr('data-hc-pill')) $(this).remove();
+    });
+  }
+
+  /**
+   * Sets the value of a given field to empty.
+   * @param field
+   * @private
+   */
+  function _nulifyField(field) {
+    var $field = _isCustomField(field) ? $("#request_custom_fields_"+field) : $("#"+field);
+    if (_isCheckbox(field)) { // checkbox
+      $field.prop("checked", false);
+    } else if (_isDate(field)) { // date field
+      $field.val('');
+      $field.prev('input').val('');
+    } else if (_isSystem(field)) { // System Type and System Priority fields
+      $field.val('');
+      $field.prev('.nesty-input').text('');
+    } else if (_isCCField(field)) {
+      _nulifyCC();
+    } else if (_isAttachment(field)) { // current uploads
+      $('#request-attachments-pool li').each(function(ind, el) { $(el).remove(); });
+    } else if (_isNoNulify(field)) { // fields that should never be nullified
+      // no actions here on purpose
+    } else { // numeric, decimal, text, regex, multiline
+      $field.val('');
+    }
+  }
+
+  /************** HELPERS **************/
+
+  /**
+   * Returns true if the field value is empty.
+   * @param value
+   * @returns {boolean}
+   * @private
+   */
+  function _isEmpty(value) {
+    return (value === undefined) ||
+      (value === null) ||
+      (value === false) ||
+      ((""+value).replace(/(\r\n|\n|\r|\s)/gm,"") === "");
+  }
+
+  /**
+   * Returns true if the field is visible.
+   * @param fieldId
+   * @returns {boolean}
+   * @private
+   */
+  function _isVisible(fieldId) {
+    var $field = _isCustomField(fieldId) ? $('.request_custom_fields_'+fieldId) : $('.'+fieldId);
+    return $field.is(":visible");
+  }
+
+  /**
+   * Returns all keys from an array of objects.
+   * @param all_conditions
+   * @returns {Array}
+   * @private
+   */
+  function _getKeys(all_conditions) {
+    var outcome = [];
+    if (all_conditions && all_conditions.length) for (var i = 0; i < all_conditions.length; i++) { outcome = outcome.concat(Object.keys(all_conditions[i])) };
+    return outcome;
+  }
+
+  /**
+   * Returns IDs of fields that cannot be nullified.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isNoNulify(field) {
+    return ['submit','request_ticket_form_id'].indexOf(field) > -1;
+  }
+
+  /**
+   * Returns true if the specified DOM element is the attachment block.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isAttachment(field) {
+    return field === 'upload-dropzone';
+  }
+
+  /**
+   * Returns true if the specified DOM element is a special system dropdown.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isSystem(field) {
+    return ['request_type','request_priority'].indexOf(field) > -1;
+  }
+
+  /**
+   * Returns true if the specified DOM element is a date field.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isDate(field) { // if DOM element is a date field
+    return $('#'+field).attr('data-datepicker') !== undefined;
+  }
+
+  /**
+   * Returns true if the specified DOM element is a checkbox.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isCheckbox(field) {
+    return $('#request_custom_fields_'+field).attr('type') === 'checkbox';
+  }
+
+  /**
+   * Returns true if the specified DOM element is a special field.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isSpecialField(field) { // if DOM element is special
+    return ['upload-dropzone','submit'].indexOf(field) > -1;
+  }
+
+  /**
+   * Returns true if the specified DOM element is a custom field.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isCustomField(field) { // if field is custom field
+    return /[0-9]/.test(field);
+  }
+
+  /**
+   * Returns true if the specified DOM element is the CC field.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isCCField(field) {
+    return (field === 'request_cc_emails');
+  }
+
+  /**
+   * Returns true if the specified DOM element is the ticket form selector.
+   * @param field
+   * @returns {boolean}
+   * @private
+   */
+  function _isTicketForm(field) { // if field is a ticket form selector
+    return (field === 'request_ticket_form_id');
+  }
+
+  /**
+   * Returns true if the specified field is being listened to.
+   * @param fieldId
+   * @returns {boolean}
+   * @private
+   */
+  function _hasChangeListener(fieldId) {
+    return PARAMS.fields_to_listen.indexOf(fieldId) > 0;
+  }
+
+  /**
+   * Returns the difference of two arrays.
+   * @param array1
+   * @param array2
+   * @returns {*}
+   * @private
+   */
+  function _arrayDifference(array1, array2) {
+    return array1.filter(function(i) {return array2.indexOf(i) < 0;});
+  }
+
+  /**
+   * Removes duplicates from an array, ignoring objects.
+   * @param arr
+   * @returns {[]}
+   * @private
+   */
+  function _removeDuplicates(arr) {
+    var obj = {}, ret_arr = [];
+    for (var i = 0; i < arr.length; i++) if (arr[i] instanceof Object) ret_arr.push(arr[i]); else obj[arr[i]] = true;
+    for (var key in obj) ret_arr.push(key);
+    return ret_arr;
+  }
+
+  /**
+   * Returns the named URL parameter.
+   * @param name
+   * @param url
+   * @returns {string}
+   * @private
+   */
+  function _getUrlParameter(name, url) {
+    url = url || window.location.href;
+    name = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
+    var regex = new RegExp('[\\?&]' + name + '=([^&#]*)'),
+      results = regex.exec(url);
+    return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
+  }
+
+  /************** PUBLIC METHODS **************/
+
+  return {
+    /**
+     * Returns true if the current page is the New Request page.
+     * @returns {boolean}
+     */
+    isNewRequestPage: function() {
+      return !!(window.location.pathname.indexOf('/requests/new') > -1 || $('#new_request').length);
+    },
+
+    /**
+     * Initializes the script.
+     * @param config
+     * @param i18n
+     */
+    processFields: function(config,i18n) {
+      if (config) {
+        _initFieldsCheck(config,i18n);
+      } else {
+        throw 'Config file is missing. Make sure you pass config file in.';
+      }
+    }
+  }
+};

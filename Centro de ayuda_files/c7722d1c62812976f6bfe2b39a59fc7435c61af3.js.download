@@ -1,0 +1,474 @@
+/**
+ * Form field population.
+ * 1.2.7 (last updated 2021-03-11)
+ * @returns {*}
+ */
+var zdForm = function() {
+
+  'use strict';
+
+  var mdl = {};
+
+  /************** PRIVATE METHODS **************/
+
+  /**
+   * Initializes the logic.
+   * @param params
+   */
+  function initiate (params) {
+    if (mdl.isNotTicketForm()) {
+      mdl.cleanAllLocalStorage();
+      return;
+    }
+    var formSettings = getSettings(params);
+
+    if (formSettings) formSettings.is_callback = params.is_callback;
+
+    if (formSettings && (mdl.hasAnyUserTag(formSettings.user_has_any_tag) || formSettings.user_has_any_tag === undefined)) executeSettings(formSettings);
+  }
+
+  /**
+   * Returns the ticket form ID.
+   * @returns {HTMLElement | *}
+   */
+  function getTicketFormID() {
+    var request_ticket_form_id = document.getElementById('request_ticket_form_id');
+    var request_issue_type_select = document.getElementById('request_issue_type_select');
+    return (request_ticket_form_id && request_ticket_form_id.value) || (request_issue_type_select && request_issue_type_select.value);
+  }
+
+  /**
+   * Returns settings for a given ticket form.
+   * @param params
+   * @returns {*|string}
+   */
+  function getSettings(params) {
+    var settings = params[getTicketFormID()];
+    return settings && getLocalStorage(settings) || settings;
+  }
+
+  /**
+   * Executes the required logic for a given set of settings.
+   * @param formSettings
+   */
+  function executeSettings(formSettings) {
+    hideFields(formSettings);
+    setDefaultValue(formSettings);
+    extendFormSetting(formSettings);
+    cleanLocalStorage(formSettings);
+
+    if (formSettings.set_on_submit) listenSubmitEvent(formSettings); else addEventListener(formSettings);
+  }
+
+  /**
+   * Sets the default field value to the ticket form name, unless a static value is provided.
+   * @param formSettings
+   */
+  function setDefaultValue(formSettings) {
+    var fieldValue = (formSettings.default_field_value !== undefined) ? formSettings.default_field_value : getFieldValue('request_issue_type_select',formSettings);
+    if ((formSettings.user_input !== undefined) && formSettings.is_form_submitted) fieldValue = formSettings.user_input;
+    setField(formSettings, fieldValue);
+  }
+
+  /**
+   * Extracts field IDs from the settings and processes placeholders with logic.
+   * @param formSettings
+   */
+  function extendFormSetting(formSettings ) {
+    formSettings.ignore_placeholders = ['one_of_the_field_ids_to_get','request_issue_type_select','user_input'];
+
+    var fields_to_process_objects = (formSettings.field_value_to_set.match(/{\[{([^}\]}]+)}\]}/g) || []).map(function(res) {
+
+      var placeholder = res.replace(/{\[{|}\]}/g , '');
+      var placeholderArray = placeholder.split('|');
+      var field_id = placeholderArray[0].trim();
+      // field_text output is not trimmed on purpose. So line breaks can be used in the script config
+      var field_text = (placeholderArray.length > 1) ? (placeholderArray[1] + ' ') : '';
+
+      return {
+        placeholder: placeholder,
+        field_id: field_id,
+        field_text: ( field_text.indexOf('FIELD_LABEL') > -1 ) ? field_text.replace('FIELD_LABEL', jQuery('label[for="' + field_id + '"]').text()) : field_text,
+        has_text: !!( (placeholderArray.length > 1) && (placeholderArray[1].trim().length > 0) )
+      };
+    });
+
+    formSettings.fields_to_process_objects = fields_to_process_objects;
+
+    var fields_to_process = fields_to_process_objects.map(function(field) { return field.field_id; });
+
+    formSettings.fields_to_process = fields_to_process;
+    formSettings.field_ids_to_listen = fields_to_process.concat(formSettings.one_of_the_field_ids_to_get);
+
+    for(var i = formSettings.field_ids_to_listen.length - 1; i >= 0; i--) {
+      if(formSettings.field_ids_to_listen[i] == 'one_of_the_field_ids_to_get') formSettings.field_ids_to_listen.splice(i, 1);
+    }
+
+    // intended for request_description when it uses wysiwyg editor
+    formSettings.isRichEditor = jQuery('#'+formSettings.field_id_to_set).attr('data-helper') == 'wysiwyg';
+  }
+
+  /**
+   * Hides the listed fields.
+   * @param formSettings
+   */
+  function hideFields(formSettings) {
+    var field_ids_to_hide = formSettings.field_ids_to_hide || [];
+    for (var i = 0; i < field_ids_to_hide.length; i++) {
+      jQuery('#'+field_ids_to_hide[i]).parent().hide();
+    }
+  }
+
+  /**
+   * Attaches event listeners to the fields that have changed.
+   * @param formSettings
+   */
+  function addEventListener(formSettings) {
+    var fields_to_listen = formSettings.field_ids_to_listen || [];
+    for (var i = 0; i < fields_to_listen.length; i++) {
+      jQuery('#'+fields_to_listen[i]).on('change',function(e) {
+        handleFieldChange(formSettings);
+      });
+    }
+  }
+
+  /**
+   * Handles events when a field value changes.
+   * @param formSettings
+   */
+  function handleFieldChange(formSettings) {
+    var results = getFields(formSettings);
+    processValues(formSettings, results);
+    setField(formSettings);
+  }
+
+  /**
+   * Returns fields.
+   * @param formSettings
+   */
+  function getFields(formSettings) {
+    var result = {}, hasOneOfTheFields;
+
+    for (var i = 0; i < formSettings.fields_to_process.length; i++) {
+      var field_reference = formSettings.fields_to_process[i];
+
+      if (field_reference == 'one_of_the_field_ids_to_get') {
+        hasOneOfTheFields = true;
+      } else if ((field_reference == 'user_input') ) {
+        result[field_reference] = formSettings.set_on_submit ? getFieldValue(formSettings.field_id_to_set, formSettings) : '';
+        formSettings.user_input = result[field_reference];
+      } else {
+        result[field_reference] = getFieldValue(field_reference, formSettings);
+      }
+    }
+
+    if (hasOneOfTheFields) result.one_of_the_field_ids_to_get = getOneOfTheFields(formSettings) || '';
+
+    return result;
+  }
+
+  /**
+   * Returns the first non-empty field value from the given list.
+   * @param formSettings
+   * @returns {*}
+   */
+  function getOneOfTheFields(formSettings) {
+    var val, field_ids = formSettings.one_of_the_field_ids_to_get;
+    for (var i = 0; i < field_ids.length; i++) {
+      var field_val = getFieldValue(field_ids[i], formSettings);
+      if (((field_val !== '-') && (field_val !== ''))) {
+        val = field_val;
+        break;
+      }
+    }
+    return val;
+  }
+
+  /**
+   * Returns a human-friendly field value.
+   * @param field_id
+   * @param formSettings
+   * @returns {string|Promise<string>}
+   */
+  function getFieldValue(field_id, formSettings) {
+    var $field = jQuery('#'+field_id);
+    var val = $field.val();
+
+    // Handle HC dropdowns
+    if ($field.is('[data-tagger]')) {
+      var json = JSON.parse($field.attr('data-tagger'));
+      val = flattenArray(json)[val];
+      if (formSettings.no_dash_for_empty_dropdown && (val == '-')) val = '';
+    }
+
+    // Handle ticket form selector
+    if (field_id === 'request_issue_type_select') {
+      val = $field.find('option[selected="selected"]').text();
+    }
+
+    // Calculates the value for placeholders with the custom text
+    if (formSettings.ignore_placeholders.indexOf(field_id) < 0) {
+      var fieldObject = getFieldObject(field_id, formSettings);
+      if (fieldObject && fieldObject.has_text) {
+        val = isEmpty(val) ? val : fieldObject.field_text + val;
+      }
+    }
+    return val;
+  }
+
+  /**
+   * Returns a single object for a given field.
+   * @param field_id
+   * @param formSettings
+   * @returns {{field_id: *, field_text: (*), has_text: boolean, placeholder: *}|*}
+   */
+  function getFieldObject(field_id, formSettings) {
+    var fieldObject, fieldObjects = formSettings.fields_to_process_objects;
+    if (field_id && fieldObjects) {
+      for (var i = 0; i < fieldObjects.length; i++) {
+        if (field_id == fieldObjects[i].field_id) {
+          return fieldObjects[i];
+          break;
+        }
+      }
+    }
+    return fieldObject;
+  }
+
+  /**
+   * Flattens dropdowns with nested values.
+   * @param fieldValues
+   */
+  function flattenArray(fieldValues) {
+    var results = {};
+    function recursiveLoop(fieldOptions) {
+      if (fieldOptions) {
+        for (var i = 0; i < fieldOptions.length; i++) {
+          if (fieldOptions[i].options) {
+            recursiveLoop(fieldOptions[i].options);
+          } else {
+            results[(fieldOptions[i].value)] = fieldOptions[i].label;
+          }
+        }
+      }
+    }
+    recursiveLoop(fieldValues);
+
+    return results;
+  }
+
+  /**
+   * Inject values into template.
+   * @param formSettings
+   * @param results
+   */
+  function processValues(formSettings, results) {
+    formSettings.processed_field_value_to_set = formSettings.field_value_to_set;
+    for (var key in results) {
+      var fieldObject = getFieldObject(key, formSettings);
+      if (fieldObject && fieldObject.has_text) {
+        var fieldValue = isEmpty(results[key]) ? '' : results[key];
+        formSettings.processed_field_value_to_set = formSettings.processed_field_value_to_set.replace('{[{' + fieldObject.placeholder + '}]}', fieldValue);
+      } else {
+        formSettings.processed_field_value_to_set = formSettings.processed_field_value_to_set.replace('{[{' + key + '}]}', results[key]);
+      }
+    }
+  }
+
+  /**
+   * Returns true if the given value is empty.
+   * @param value
+   * @returns {boolean}
+   */
+  function isEmpty(value) {
+    return (value === undefined || value === null || value === '' || value === '-');
+  }
+
+  /**
+   * Sets the value of a field.
+   * @param formSettings
+   * @param optionalValue
+   */
+  function setField(formSettings, optionalValue) {
+    if (formSettings.isRichEditor) {
+      // Use TinyMCE Rich editor API to set the content
+      tinyMCE.get(formSettings.field_id_to_set).setContent((optionalValue !== undefined) ? optionalValue : formSettings.processed_field_value_to_set)
+    } else {
+      jQuery('#'+formSettings.field_id_to_set).val((optionalValue !== undefined) ? optionalValue : formSettings.processed_field_value_to_set);
+    }
+  }
+
+  /**
+   * Executes logic on ticket submit.
+   * @param formSettings
+   */
+  function listenSubmitEvent(formSettings) {
+
+    // For some weird reasons jQuery('form#new_request').on('submit', function(e) { doesn't work for anonymous
+    // visitors, but works for end-users. Event listener will not be added when form submission has failed
+    if (!formSettings.is_callback || !formSettings.is_form_submitted) {
+      jQuery('#new_request').find('input[type="submit"]').on('click', function(e){
+        handleSubmit(formSettings)
+      });
+    }
+  }
+
+  /**
+   * Handles the form submission.
+   * @param formSettings
+   * @returns {boolean}
+   */
+  function handleSubmit(formSettings) {
+    handleFieldChange(formSettings);
+    formSettings.is_form_submitted = true;
+    setLocalStorage(formSettings);
+    return true;
+  }
+
+  /**
+   * Returns the localStorage key for all script-related data.
+   * @returns {string}
+   */
+  function getLocaleStorageKey() {
+    return '_zdForm_';
+  }
+
+  /**
+   * Returns the localStorage key for a particular setting.
+   * @param formSettings
+   * @returns {string}
+   */
+  function getLocalStorageAttribute(formSettings) {
+    return getTicketFormID() + '_' + formSettings.field_id_to_set;
+  }
+
+  /**
+   * Sets the value for a given setting in localStorage.
+   * @param formSettings
+   */
+  function setLocalStorage(formSettings) {
+    if (window.localStorage) {
+      var currentValue = JSON.parse(window.localStorage.getItem(getLocaleStorageKey()));
+      if (currentValue) {
+        currentValue[getLocalStorageAttribute(formSettings)] = formSettings;
+        window.localStorage.setItem(getLocaleStorageKey(), JSON.stringify(currentValue));
+      } else {
+        window.localStorage.setItem(getLocaleStorageKey(), JSON.stringify({ [getLocalStorageAttribute(formSettings)]:formSettings }));
+      }
+    }
+  }
+
+  /**
+   * Returns the value for a given setting from localStorage.
+   * @param formSettings
+   * @returns {string}
+   */
+  function getLocalStorage(formSettings) {
+    var result;
+    if (window.localStorage) result = JSON.parse(window.localStorage.getItem(getLocaleStorageKey()));
+    return (result !== null) ? result[getLocalStorageAttribute(formSettings)] : '';
+  }
+
+  /**
+   * Removes a particular setting from localStorage.
+   * When script runs for multiple fields on the same ticket form.
+   * @param formSettings
+   */
+  function cleanLocalStorage(formSettings) {
+    if (window.localStorage) {
+      var currentValue = JSON.parse(window.localStorage.getItem(getLocaleStorageKey()));
+
+      if (currentValue) {
+        if (Object.keys(currentValue).length == 1) {
+          mdl.cleanAllLocalStorage()
+        } else {
+          delete currentValue[getLocalStorageAttribute(formSettings)];
+          window.localStorage.setItem(getLocaleStorageKey(), JSON.stringify(currentValue));
+        }
+      }
+    }
+  }
+
+  /**
+   * Logs a message to the browser console.
+   * @param msg
+   */
+  function showError(msg) {
+    if (msg) console.warn('[' + new Date.now().toLocaleDateString() + '] TICKET FORM FIELDS PRESET SCRIPT (zdForm) ERROR: ' + msg);
+  }
+
+
+  /************** PUBLIC METHODS **************/
+
+  /**
+   * Initializes the script.
+   * @param params
+   */
+  mdl.init = function(params) {
+    if (!params) {
+      showError('CONFIGURATION IS MISSING, BROKEN OR MISSFORMATTED. SCRIPT WILL NOT RUN.');
+      return;
+    }
+    initiate(params);
+  };
+
+  /**
+   * Returns true if the help center user has at least one tag of those provided.
+   * @param listOfUserTags
+   * @returns {boolean}
+   */
+  mdl.hasAnyUserTag = function(listOfUserTags) {
+    var hasTags,
+      h = HelpCenter,
+      hasHelpCenter = h && h.user && h.user.tags && h.user.tags.length;
+
+    if (listOfUserTags && hasHelpCenter) {
+      hasTags = listOfUserTags.filter(function(n) {
+        var isMatchPattern;
+
+        if (n.indexOf('/') > -1) {
+          var re = new RegExp(n.replace(/\//g, ''));
+          for (var i = 0; i < h.user.tags.length; i++) {
+            if (re.test(h.user.tags[i])) {
+              isMatchPattern = true;
+              break;
+            }
+          }
+        }
+        return (h.user.tags.indexOf(n) !== -1) || !!isMatchPattern;
+      });
+    }
+    return !!hasTags && !!hasTags.length;
+  };
+
+  /**
+   * Re-initializes the script.
+   * To be used when the script need to re-run, for example when form submission is controlled by another script and submission failed.
+   * @param params
+   */
+  mdl.handleSubmissionError = function(params) {
+    if (params) {
+      params.is_callback = true;
+      initiate(params);
+    }
+  };
+
+  /**
+   * Returns true if the ticket form does not exist.
+   * @returns {boolean}
+   */
+  mdl.isNotTicketForm = function() {
+    var form = document.getElementById('new_request');
+    return !((window.location.href.indexOf('/requests') > -1) && form && form.getElementsByTagName('footer') && (form.getElementsByTagName('footer').length > 0));
+  };
+
+  /**
+   * Removes all script-related localStorage data.
+   */
+  mdl.cleanAllLocalStorage = function() {
+    window.localStorage && window.localStorage.removeItem(getLocaleStorageKey());
+  };
+
+  return mdl;
+
+};
